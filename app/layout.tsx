@@ -45,7 +45,7 @@ export default function RootLayout({
               {children}
             </main>
             <footer className="w-full flex items-center justify-center py-3">
-              <p>Powered by Xellar & Lisk & IDRX</p>
+              <p>Powered by Lisk & Xellar & IDRX</p>
             </footer>
           </div>
         </Providers>

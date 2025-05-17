@@ -3,10 +3,15 @@ import {
   useBalance,
   useWriteContract,
   useReadContract,
+  useSwitchChain,
 } from "wagmi";
 import { useMutation } from "@tanstack/react-query";
 import { parseUnits } from "viem";
+import { useConfig } from "wagmi";
+import { waitForTransactionReceipt } from "wagmi/actions";
+import { lisk } from "viem/chains";
 
+import { markPendingComplete } from "@/app/server-only/mark-pending-complete";
 import { initiatePayment } from "@/app/server-only/initiate-payment";
 
 const paymentGatewayContractAddress =
@@ -105,7 +110,12 @@ const paymentGatewayContractABI = [
 ] as const;
 
 interface UsePayOptions {
-  onSuccess?: () => void;
+  onSuccess?: (data: {
+    hash: `0x${string}`;
+    paymentId: string;
+    sender: string;
+    signature: `0x${string}`;
+  }) => void;
   onError?: (error: Error) => void;
 }
 
@@ -113,14 +123,17 @@ interface UsePayOptions {
 const parseIdrx = (amount: string) => parseUnits(amount, 2);
 
 export function usePay({ onSuccess, onError }: UsePayOptions = {}) {
-  const { address } = useAccount();
+  const { address, chain } = useAccount();
   const { data: balance } = useBalance({
     address,
     token: idrxAddress,
     chainId: 1135,
   });
+  const { switchChainAsync } = useSwitchChain();
 
   const { writeContractAsync } = useWriteContract();
+
+  const config = useConfig();
 
   const { data: allowance } = useReadContract({
     abi: erc20Abi,
@@ -147,6 +160,13 @@ export function usePay({ onSuccess, onError }: UsePayOptions = {}) {
 
       const requiredAllowance = parseIdrx(totalAmount);
 
+      console.log("allowance", allowance);
+      console.log("requiredAllowance", requiredAllowance);
+
+      if (chain?.id !== lisk.id) {
+        await switchChainAsync({ chainId: lisk.id });
+      }
+
       if (!allowance || BigInt(allowance) < requiredAllowance) {
         // Approve tokens
         await writeContractAsync({
@@ -157,6 +177,7 @@ export function usePay({ onSuccess, onError }: UsePayOptions = {}) {
             paymentGatewayContractAddress as `0x${string}`,
             requiredAllowance,
           ],
+          chain: lisk,
         });
       }
 
@@ -165,27 +186,67 @@ export function usePay({ onSuccess, onError }: UsePayOptions = {}) {
       if (!response.success || !response.data)
         throw new Error(response.message);
 
-      const { id, deadline, recipient, signature } = response.data;
+      const {
+        id,
+        deadline,
+        recipient,
+        signature,
+        recipientAmount,
+        recipientCurrency,
+        refundDestination,
+        feeAmount,
+        operator,
+        prefix,
+      } = response.data;
+
+      console.log(response.data);
 
       const paymentIntent = {
-        recipientAmount: parseIdrx(totalAmount),
+        recipientAmount: BigInt(recipientAmount),
         deadline: BigInt(deadline),
         recipient: recipient as `0x${string}`,
-        recipientCurrency: idrxAddress as `0x${string}`,
-        refundDestination: address,
-        feeAmount: BigInt(0),
-        id: id as `0x${string}`,
-        operator: address,
+        recipientCurrency: recipientCurrency as `0x${string}`,
+        refundDestination: refundDestination as `0x${string}`,
+        feeAmount: BigInt(feeAmount),
+        id: ("0x" + id) as `0x${string}`,
+        operator: operator as `0x${string}`,
         signature: signature as `0x${string}`,
-        prefix: "0x" as `0x${string}`,
+        prefix: prefix as `0x${string}`,
       };
 
-      await writeContractAsync({
+      console.log("writing contract");
+      const hash = await writeContractAsync({
         abi: paymentGatewayContractABI,
         address: paymentGatewayContractAddress as `0x${string}`,
         functionName: "processPreApprovedPayment",
         args: [paymentIntent],
+        chain: lisk,
       });
+
+      console.log("contract written");
+
+      const transactionReceipt = await waitForTransactionReceipt(config, {
+        hash,
+      });
+
+      console.log("transactionReceipt", transactionReceipt);
+
+      // Mark payment as pending-complete after successful transaction
+      const markResult = await markPendingComplete(paymentId, {
+        sender: address,
+        signature: signature as `0x${string}`,
+      });
+
+      if (!markResult.success) {
+        throw new Error(markResult.message);
+      }
+
+      return {
+        hash,
+        paymentId,
+        sender: address,
+        signature: signature as `0x${string}`,
+      };
     },
     onSuccess,
     onError,

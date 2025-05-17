@@ -24,85 +24,13 @@ import {
   useAccount,
   useBalance,
   useDisconnect,
-  useWriteContract,
-  useReadContract,
+  useWaitForTransactionReceipt,
 } from "wagmi";
 import Avatar from "react-avatar";
-import { parseUnits } from "viem";
 
 import { Payment } from "@/app/server-only/get-payment";
 import { usePay } from "@/app/hooks/usePay";
-
-const paymentGatewayContractABI = [
-  {
-    type: "function",
-    name: "processPreApprovedPayment",
-    inputs: [
-      {
-        name: "intent",
-        type: "tuple",
-        internalType: "struct PaymentIntent",
-        components: [
-          {
-            name: "recipientAmount",
-            type: "uint256",
-            internalType: "uint256",
-          },
-          {
-            name: "deadline",
-            type: "uint256",
-            internalType: "uint256",
-          },
-          {
-            name: "recipient",
-            type: "address",
-            internalType: "address payable",
-          },
-          {
-            name: "recipientCurrency",
-            type: "address",
-            internalType: "address",
-          },
-          {
-            name: "refundDestination",
-            type: "address",
-            internalType: "address",
-          },
-          {
-            name: "feeAmount",
-            type: "uint256",
-            internalType: "uint256",
-          },
-          {
-            name: "id",
-            type: "bytes16",
-            internalType: "bytes16",
-          },
-          {
-            name: "operator",
-            type: "address",
-            internalType: "address",
-          },
-          {
-            name: "signature",
-            type: "bytes",
-            internalType: "bytes",
-          },
-          {
-            name: "prefix",
-            type: "bytes",
-            internalType: "bytes",
-          },
-        ],
-      },
-    ],
-    outputs: [],
-    stateMutability: "nonpayable",
-  },
-];
-
-const paymentGatewayContractAddress =
-  "0x8D5680a242F0Ec85153881F89a48150691826123";
+import { updateCustomerInfo } from "@/app/server-only/update-customer-info";
 
 const idrxAddress = "0x18Bc5bcC660cf2B9cE3cd51a404aFe1a0cBD3C22";
 
@@ -110,12 +38,6 @@ interface CustomerProfile {
   name: string;
   email: string;
   phone: string;
-}
-
-interface BusinessProfile {
-  name: string;
-  logo: string;
-  address: string;
 }
 
 interface CheckoutUIProps {
@@ -137,14 +59,10 @@ interface CheckoutUIProps {
   primaryTextColor?: string;
   /** Secondary text color */
   secondaryTextColor?: string;
-
-  onClickConnectWallet?: () => void;
-  onClickPay?: () => void;
+  /** Called when payment is successful */
+  onFinish?: () => void;
   payment: Payment;
 }
-
-// Helper function to parse IDRX amount (2 decimals)
-const parseIdrx = (amount: string) => parseUnits(amount, 2);
 
 export default function CheckoutUI({
   primaryColor = "#2563eb", // blue-600
@@ -156,11 +74,13 @@ export default function CheckoutUI({
   bottomBarColor = "#111827", // gray-900
   primaryTextColor = "#fff", // white
   secondaryTextColor = "#a1a1aa", // zinc-400
-  onClickConnectWallet = () => {},
   payment,
-  onClickPay = () => {},
+  onFinish,
 }: CheckoutUIProps) {
   const [isWalletConnected, setIsWalletConnected] = useState(false);
+  const [transactionHash, setTransactionHash] = useState<
+    `0x${string}` | undefined
+  >(undefined);
   const { open } = useConnectModal();
   const { address } = useAccount();
   const { disconnect } = useDisconnect();
@@ -177,35 +97,52 @@ export default function CheckoutUI({
   const [timeLeft, setTimeLeft] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const { writeContractAsync } = useWriteContract();
+  const { isLoading: isTransactionLoading, isSuccess: isTransactionSuccess } =
+    useWaitForTransactionReceipt({
+      hash: transactionHash,
+    });
 
-  const { data: allowance } = useReadContract({
-    abi: [
-      {
-        name: "allowance",
-        type: "function",
-        stateMutability: "view",
-        inputs: [
-          { name: "owner", type: "address" },
-          { name: "spender", type: "address" },
-        ],
-        outputs: [{ name: "", type: "uint256" }],
-      },
-    ],
-    address: idrxAddress as `0x${string}`,
-    functionName: "allowance",
-    args: address
-      ? [address, paymentGatewayContractAddress as `0x${string}`]
-      : undefined,
-    query: { enabled: !!address },
-  });
+  useEffect(() => {
+    if (isTransactionSuccess) {
+      onFinish?.();
+    }
+  }, [isTransactionSuccess, onFinish]);
 
   const {
     mutate: pay,
     isPending,
     error: payError,
   } = usePay({
-    onSuccess: onClickPay,
+    onSuccess: async ({ hash, paymentId, sender, signature }) => {
+      setTransactionHash(hash);
+
+      // If customer source is 'customer', update customer info
+      if (payment.customer?.source === "customer") {
+        try {
+          const customerResult = await updateCustomerInfo(
+            paymentId,
+            {
+              sender,
+              signature,
+            },
+            {
+              name: customerInfo.name,
+              email: customerInfo.email,
+              phone: customerInfo.phone,
+            }
+          );
+
+          if (!customerResult.success) {
+            console.error(
+              "Failed to update customer info:",
+              customerResult.message
+            );
+          }
+        } catch (err) {
+          console.error("Error updating customer info:", err);
+        }
+      }
+    },
     onError: (error) => {
       setError(error.message);
     },
@@ -244,7 +181,6 @@ export default function CheckoutUI({
     }
   }, [address]);
 
-  const handleWalletConnect = () => setIsWalletConnected(true);
   const handleCustomerInfoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setCustomerInfo({ ...customerInfo, [e.target.name]: e.target.value });
   };
@@ -625,8 +561,8 @@ export default function CheckoutUI({
             ) : (
               <Button
                 className="w-full py-3 font-medium"
-                isDisabled={isPending}
-                isLoading={isPending}
+                isDisabled={isPending || isTransactionLoading}
+                isLoading={isPending || isTransactionLoading}
                 style={{
                   background: customization?.primaryColor || primaryColor,
                   color: customization?.primaryTextColor || primaryTextColor,
@@ -634,7 +570,11 @@ export default function CheckoutUI({
                 }}
                 type="submit"
               >
-                {isPending ? "Processing..." : "Pay Now"}
+                {isPending
+                  ? "Processing..."
+                  : isTransactionLoading
+                    ? "Confirming Transaction..."
+                    : "Pay Now"}
               </Button>
             )}
           </form>

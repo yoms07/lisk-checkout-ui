@@ -1,3 +1,4 @@
+"use server";
 interface Asset {
   type: string;
   address: string;
@@ -65,6 +66,8 @@ export interface Payment {
   created_at: string;
   updated_at: string;
   source: string;
+  success_redirect_url?: string | null;
+  failure_redirect_url?: string | null;
   checkout_customization: CheckoutCustomization | null;
   business_profile: BusinessProfile;
 }
