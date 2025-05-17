@@ -1,10 +1,24 @@
 import CheckoutUI from "@/components/checkout-ui";
+import { getPayment } from "@/app/server-only/get-payment";
 
-const paymentGatewayContractAddress =
-  "0x8D5680a242F0Ec85153881F89a48150691826123";
+export default async function Page({
+  params,
+}: {
+  params: { paymentId: string };
+}) {
+  const { paymentId } = await params;
+  const payment = await getPayment(paymentId);
 
-const idrxAddress = "0x18Bc5bcC660cf2B9cE3cd51a404aFe1a0cBD3C22";
-
-export default function Page() {
-  return <CheckoutUI />;
+  return (
+    <CheckoutUI
+      borderRadius={payment.checkout_customization?.borderRadius}
+      payment={payment}
+      primaryColor={payment.checkout_customization?.primaryColor}
+      primaryTextColor={payment.checkout_customization?.primaryTextColor}
+      secondaryColor={payment.checkout_customization?.secondaryColor}
+      secondaryTextColor={payment.checkout_customization?.secondaryTextColor}
+      topBarColor={payment.checkout_customization?.topBarColor}
+      topBarTextColor={payment.checkout_customization?.topBarTextColor}
+    />
+  );
 }

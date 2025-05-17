@@ -19,7 +19,92 @@ import {
   ChevronRightIcon,
 } from "@heroicons/react/24/outline";
 import Image from "next/image";
-import { ConnectButton } from "@xellar/kit";
+import { useConnectModal } from "@xellar/kit";
+import {
+  useAccount,
+  useBalance,
+  useDisconnect,
+  useWriteContract,
+  useReadContract,
+} from "wagmi";
+import Avatar from "react-avatar";
+import { parseUnits } from "viem";
+
+import { Payment } from "@/app/server-only/get-payment";
+import { usePay } from "@/app/hooks/usePay";
+
+const paymentGatewayContractABI = [
+  {
+    type: "function",
+    name: "processPreApprovedPayment",
+    inputs: [
+      {
+        name: "intent",
+        type: "tuple",
+        internalType: "struct PaymentIntent",
+        components: [
+          {
+            name: "recipientAmount",
+            type: "uint256",
+            internalType: "uint256",
+          },
+          {
+            name: "deadline",
+            type: "uint256",
+            internalType: "uint256",
+          },
+          {
+            name: "recipient",
+            type: "address",
+            internalType: "address payable",
+          },
+          {
+            name: "recipientCurrency",
+            type: "address",
+            internalType: "address",
+          },
+          {
+            name: "refundDestination",
+            type: "address",
+            internalType: "address",
+          },
+          {
+            name: "feeAmount",
+            type: "uint256",
+            internalType: "uint256",
+          },
+          {
+            name: "id",
+            type: "bytes16",
+            internalType: "bytes16",
+          },
+          {
+            name: "operator",
+            type: "address",
+            internalType: "address",
+          },
+          {
+            name: "signature",
+            type: "bytes",
+            internalType: "bytes",
+          },
+          {
+            name: "prefix",
+            type: "bytes",
+            internalType: "bytes",
+          },
+        ],
+      },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+];
+
+const paymentGatewayContractAddress =
+  "0x8D5680a242F0Ec85153881F89a48150691826123";
+
+const idrxAddress = "0x18Bc5bcC660cf2B9cE3cd51a404aFe1a0cBD3C22";
 
 interface CustomerProfile {
   name: string;
@@ -31,12 +116,6 @@ interface BusinessProfile {
   name: string;
   logo: string;
   address: string;
-}
-
-interface ItemDetail {
-  name: string;
-  price: number;
-  quantity: number;
 }
 
 interface CheckoutUIProps {
@@ -60,11 +139,12 @@ interface CheckoutUIProps {
   secondaryTextColor?: string;
 
   onClickConnectWallet?: () => void;
-
   onClickPay?: () => void;
+  payment: Payment;
 }
 
-const expiredAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
+// Helper function to parse IDRX amount (2 decimals)
+const parseIdrx = (amount: string) => parseUnits(amount, 2);
 
 export default function CheckoutUI({
   primaryColor = "#2563eb", // blue-600
@@ -77,33 +157,65 @@ export default function CheckoutUI({
   primaryTextColor = "#fff", // white
   secondaryTextColor = "#a1a1aa", // zinc-400
   onClickConnectWallet = () => {},
+  payment,
   onClickPay = () => {},
 }: CheckoutUIProps) {
   const [isWalletConnected, setIsWalletConnected] = useState(false);
+  const { open } = useConnectModal();
+  const { address } = useAccount();
+  const { disconnect } = useDisconnect();
+  const { data: balance } = useBalance({
+    address,
+    token: idrxAddress,
+    chainId: 1135,
+  });
   const [customerInfo, setCustomerInfo] = useState<CustomerProfile>({
-    name: "",
-    email: "",
-    phone: "",
+    name: payment.customer.name || "",
+    email: payment.customer.email || "",
+    phone: payment.customer.phone || "",
   });
   const [timeLeft, setTimeLeft] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
-  // Placeholder data - to be replaced with actual data from backend
-  const itemDetail: ItemDetail = {
-    name: "Sample Product",
-    price: 1500000,
-    quantity: 1,
-  };
+  const { writeContractAsync } = useWriteContract();
 
-  const businessProfile: BusinessProfile = {
-    name: "Sample Business",
-    logo: "/placeholder-store.png",
-    address: "123 Business Street, Jakarta",
-  };
+  const { data: allowance } = useReadContract({
+    abi: [
+      {
+        name: "allowance",
+        type: "function",
+        stateMutability: "view",
+        inputs: [
+          { name: "owner", type: "address" },
+          { name: "spender", type: "address" },
+        ],
+        outputs: [{ name: "", type: "uint256" }],
+      },
+    ],
+    address: idrxAddress as `0x${string}`,
+    functionName: "allowance",
+    args: address
+      ? [address, paymentGatewayContractAddress as `0x${string}`]
+      : undefined,
+    query: { enabled: !!address },
+  });
+
+  const {
+    mutate: pay,
+    isPending,
+    error: payError,
+  } = usePay({
+    onSuccess: onClickPay,
+    onError: (error) => {
+      setError(error.message);
+    },
+  });
 
   // Countdown timer
   useEffect(() => {
     const updateCountdown = () => {
       const now = new Date();
+      const expiredAt = new Date(payment.expired_at);
       const diffInSeconds = differenceInSeconds(expiredAt, now);
 
       if (diffInSeconds <= 0) {
@@ -122,26 +234,50 @@ export default function CheckoutUI({
     const interval = setInterval(updateCountdown, 1000);
 
     return () => clearInterval(interval);
-  }, [expiredAt]);
+  }, [payment.expired_at]);
+
+  useEffect(() => {
+    if (address) {
+      setIsWalletConnected(true);
+    } else {
+      setIsWalletConnected(false);
+    }
+  }, [address]);
 
   const handleWalletConnect = () => setIsWalletConnected(true);
   const handleCustomerInfoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setCustomerInfo({ ...customerInfo, [e.target.name]: e.target.value });
   };
-  const handlePay = (e: React.FormEvent) => {
+
+  const handlePay = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Implement pay logic
+    setError(null);
+    try {
+      await pay({ paymentId: payment.payment_id, totalAmount });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Payment failed");
+      console.error("Payment error:", err);
+    }
   };
-  const formatCurrency = (amount: number) =>
+
+  const formatCurrency = (amount: string) =>
     new Intl.NumberFormat("id-ID", {
       style: "currency",
       currency: "IDR",
-    }).format(amount);
+    }).format(Number(amount));
+
+  const totalAmount = payment.pricing.local.amount;
+  const customization = payment.checkout_customization;
+
+  const handleDisconnectWallet = () => {
+    disconnect();
+    setIsWalletConnected(false);
+  };
 
   return (
     <div
       className="min-h-screen flex items-center justify-center p-4"
-      style={{ background: overlayColor }}
+      style={{ background: customization?.overlayColor || overlayColor }}
     >
       <motion.div
         animate={{ opacity: 1, y: 0 }}
@@ -150,38 +286,47 @@ export default function CheckoutUI({
       >
         <Card
           className="relative"
-          style={{ borderRadius, boxShadow: "0 4px 24px 0 rgba(0,0,0,0.08)" }}
+          style={{
+            borderRadius: customization?.borderRadius || borderRadius,
+            boxShadow: "0 4px 24px 0 rgba(0,0,0,0.08)",
+          }}
         >
           {/* Top bar with menu */}
           <div
             className="flex justify-between items-center p-6 border-b border-gray-700"
             style={{
-              background: topBarColor,
-              borderTopLeftRadius: borderRadius,
-              borderTopRightRadius: borderRadius,
+              background: customization?.topBarColor || topBarColor,
+              borderTopLeftRadius: customization?.borderRadius || borderRadius,
+              borderTopRightRadius: customization?.borderRadius || borderRadius,
             }}
           >
             <div className="flex items-center space-x-3">
-              <Image
-                alt={businessProfile.name}
-                className="w-12 h-12 rounded-full bg-gray-700 object-cover"
-                height={12}
-                src={businessProfile.logo}
-                width={12}
-              />
-              <p
-                className="font-semibold text-lg"
-                style={{ color: topBarTextColor }}
-              >
-                {businessProfile.name}
-              </p>
+              {payment.business_profile_id && (
+                <Avatar
+                  round
+                  color={customization?.primaryColor || primaryColor}
+                  fgColor="#fff"
+                  name={payment.business_profile.business_name}
+                  size="48"
+                />
+              )}
+              <div>
+                <p
+                  className="font-semibold text-lg"
+                  style={{
+                    color: customization?.topBarTextColor || topBarTextColor,
+                  }}
+                >
+                  {payment.business_profile.business_name}
+                </p>
+              </div>
             </div>
             <Popover showArrow placement="bottom">
               <PopoverTrigger>
                 <Button
                   isIconOnly
                   className="hover:text-white"
-                  style={{ color: primaryColor }}
+                  style={{ color: customization?.primaryColor || primaryColor }}
                   variant="light"
                 >
                   <Bars3Icon className="w-6 h-6" />
@@ -190,9 +335,11 @@ export default function CheckoutUI({
               <PopoverContent className="w-48 bg-gray-800 border border-gray-700 rounded-lg shadow-lg">
                 <Button
                   className="w-full justify-start hover:bg-gray-700 rounded-t-lg"
-                  style={{ color: topBarTextColor }}
+                  style={{
+                    color: customization?.topBarTextColor || topBarTextColor,
+                  }}
                   variant="light"
-                  onPress={() => setIsWalletConnected(false)}
+                  onPress={handleDisconnectWallet}
                 >
                   Disconnect Wallet
                 </Button>
@@ -203,9 +350,11 @@ export default function CheckoutUI({
           <form
             className="p-6"
             style={{
-              background: bottomBarColor,
-              borderBottomLeftRadius: borderRadius,
-              borderBottomRightRadius: borderRadius,
+              background: customization?.bottomBarColor || bottomBarColor,
+              borderBottomLeftRadius:
+                customization?.borderRadius || borderRadius,
+              borderBottomRightRadius:
+                customization?.borderRadius || borderRadius,
             }}
             onSubmit={handlePay}
           >
@@ -213,15 +362,20 @@ export default function CheckoutUI({
             <div className="mb-2 flex flex-col items-start pt-1">
               <span
                 className="text-xs font-medium"
-                style={{ color: secondaryTextColor }}
+                style={{
+                  color:
+                    customization?.secondaryTextColor || secondaryTextColor,
+                }}
               >
                 Pay
               </span>
               <span
                 className="text-2xl font-bold"
-                style={{ color: primaryTextColor }}
+                style={{
+                  color: customization?.primaryTextColor || primaryTextColor,
+                }}
               >
-                {formatCurrency(itemDetail.price)}
+                {formatCurrency(totalAmount)}
               </span>
             </div>
 
@@ -232,83 +386,126 @@ export default function CheckoutUI({
                   key="item-details"
                   className="text-sm"
                   title={
-                    <span style={{ color: primaryTextColor }}>
+                    <span
+                      style={{
+                        color:
+                          customization?.primaryTextColor || primaryTextColor,
+                      }}
+                    >
                       Order Summary
                     </span>
                   }
                 >
                   <div className="pb-4">
-                    <p style={{ color: secondaryTextColor }}>
-                      {itemDetail.name}
-                    </p>
-                    <p
-                      className="text-lg font-bold"
-                      style={{ color: primaryTextColor }}
-                    >
-                      {formatCurrency(itemDetail.price)}
-                    </p>
+                    {payment.items.map((item: any) => (
+                      <div key={item.item_id} className="mb-2">
+                        <p
+                          style={{
+                            color:
+                              customization?.secondaryTextColor ||
+                              secondaryTextColor,
+                          }}
+                        >
+                          {item.name} x {item.quantity}
+                        </p>
+                        <p
+                          className="text-lg font-bold"
+                          style={{
+                            color:
+                              customization?.primaryTextColor ||
+                              primaryTextColor,
+                          }}
+                        >
+                          {formatCurrency(item.unit_price)}
+                        </p>
+                      </div>
+                    ))}
                   </div>
                 </AccordionItem>
               </Accordion>
             </div>
 
             {/* Billing Info */}
-            <div className="mb-6" style={{ borderRadius }}>
-              <h2
-                className="text-lg font-semibold mb-2"
-                style={{ color: primaryTextColor }}
+            {payment.customer.source !== "business" && (
+              <div
+                className="mb-6"
+                style={{
+                  borderRadius: customization?.borderRadius || borderRadius,
+                }}
               >
-                Billing Information
-              </h2>
-              <div className="space-y-3">
-                <Input
-                  classNames={{
-                    label: "font-medium",
-                    inputWrapper: `bg-[${secondaryColor}]`,
+                <h2
+                  className="text-lg font-semibold mb-2"
+                  style={{
+                    color: customization?.primaryTextColor || primaryTextColor,
                   }}
-                  label="Name"
-                  name="name"
-                  style={{ color: primaryTextColor }}
-                  value={customerInfo.name}
-                  onChange={handleCustomerInfoChange}
-                />
-                <Input
-                  classNames={{
-                    label: "font-medium",
-                    inputWrapper: `bg-[${secondaryColor}]`,
-                  }}
-                  label="Email"
-                  name="email"
-                  style={{ color: primaryTextColor }}
-                  type="email"
-                  value={customerInfo.email}
-                  onChange={handleCustomerInfoChange}
-                />
-                <Input
-                  classNames={{
-                    label: "font-medium",
-                    inputWrapper: `bg-[${secondaryColor}]`,
-                  }}
-                  label="Phone"
-                  name="phone"
-                  style={{ color: primaryTextColor }}
-                  type="tel"
-                  value={customerInfo.phone}
-                  onChange={handleCustomerInfoChange}
-                />
+                >
+                  Billing Information
+                </h2>
+                <div className="space-y-3">
+                  <Input
+                    classNames={{
+                      label: "font-medium",
+                      inputWrapper: `bg-[${customization?.secondaryColor || secondaryColor}]`,
+                    }}
+                    label="Name"
+                    name="name"
+                    style={{
+                      color:
+                        customization?.primaryTextColor || primaryTextColor,
+                    }}
+                    value={customerInfo.name}
+                    onChange={handleCustomerInfoChange}
+                  />
+                  <Input
+                    classNames={{
+                      label: "font-medium",
+                      inputWrapper: `bg-[${customization?.secondaryColor || secondaryColor}]`,
+                    }}
+                    label="Email"
+                    name="email"
+                    style={{
+                      color:
+                        customization?.primaryTextColor || primaryTextColor,
+                    }}
+                    type="email"
+                    value={customerInfo.email}
+                    onChange={handleCustomerInfoChange}
+                  />
+                  <Input
+                    classNames={{
+                      label: "font-medium",
+                      inputWrapper: `bg-[${customization?.secondaryColor || secondaryColor}]`,
+                    }}
+                    label="Phone"
+                    name="phone"
+                    style={{
+                      color:
+                        customization?.primaryTextColor || primaryTextColor,
+                    }}
+                    type="tel"
+                    value={customerInfo.phone}
+                    onChange={handleCustomerInfoChange}
+                  />
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Pay with UI */}
             <div
               className="flex items-center justify-between mb-6 shadow border border-gray-200 px-4 py-3"
-              style={{ background: secondaryColor, borderRadius }}
+              style={{
+                background: customization?.secondaryColor || secondaryColor,
+                borderRadius: customization?.borderRadius || borderRadius,
+              }}
             >
               <div className="flex items-center gap-3">
                 {/* Lisk Logo in circle */}
                 <span
                   className="w-10 h-10 rounded-full flex items-center justify-center"
-                  style={{ background: primaryColor + "22" }}
+                  style={{
+                    background:
+                      (customization?.primaryColor || primaryColor) + "22",
+                  }}
                 >
                   <Image
                     alt="Lisk Logo"
@@ -322,15 +519,22 @@ export default function CheckoutUI({
                   <div className="flex items-center gap-1">
                     <span
                       className="font-semibold text-base"
-                      style={{ color: primaryTextColor }}
+                      style={{
+                        color:
+                          customization?.primaryTextColor || primaryTextColor,
+                      }}
                     >
-                      Pay with
+                      Available Balance
                     </span>
                   </div>
                   <div className="flex items-center gap-1">
                     <span
                       className="font-medium"
-                      style={{ color: secondaryTextColor }}
+                      style={{
+                        color:
+                          customization?.secondaryTextColor ||
+                          secondaryTextColor,
+                      }}
                     >
                       IDRX on Lisk
                     </span>
@@ -338,24 +542,50 @@ export default function CheckoutUI({
                 </div>
               </div>
               <div className="flex flex-col items-end">
-                <span
-                  className="font-semibold text-base"
-                  style={{ color: primaryTextColor }}
-                >
-                  {formatCurrency(itemDetail.price)}
-                </span>
-                <div className="flex items-center gap-1">
+                {isWalletConnected && balance ? (
+                  <>
+                    <span
+                      className="font-semibold text-base"
+                      style={{
+                        color:
+                          customization?.primaryTextColor || primaryTextColor,
+                      }}
+                    >
+                      {balance.formatted} IDRX
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <span
+                        className={`text-sm font-medium ${
+                          Number(balance.formatted) >= Number(totalAmount)
+                            ? "text-green-500"
+                            : "text-red-500"
+                        }`}
+                      >
+                        {Number(balance.formatted) >= Number(totalAmount)
+                          ? "Sufficient Balance"
+                          : "Insufficient Balance"}
+                      </span>
+                      <ChevronRightIcon
+                        className="w-4 h-4"
+                        style={{
+                          color:
+                            customization?.secondaryTextColor ||
+                            secondaryTextColor,
+                        }}
+                      />
+                    </div>
+                  </>
+                ) : (
                   <span
                     className="text-sm font-medium"
-                    style={{ color: secondaryTextColor }}
+                    style={{
+                      color:
+                        customization?.secondaryTextColor || secondaryTextColor,
+                    }}
                   >
-                    Available
+                    Connect wallet to view balance
                   </span>
-                  <ChevronRightIcon
-                    className="w-4 h-4"
-                    style={{ color: secondaryTextColor }}
-                  />
-                </div>
+                )}
               </div>
             </div>
 
@@ -363,27 +593,50 @@ export default function CheckoutUI({
             <div className="mb-1 flex flex-col items-center">
               <span
                 className="flex items-center text-xs"
-                style={{ color: secondaryTextColor }}
+                style={{
+                  color:
+                    customization?.secondaryTextColor || secondaryTextColor,
+                }}
               >
                 <ClockIcon className="w-4 h-4 mr-1" />
                 {timeLeft}
               </span>
             </div>
 
+            {error && (
+              <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                <p className="text-sm text-red-500">{error}</p>
+              </div>
+            )}
+
             {/* Connect Wallet / Pay Button */}
-            <Button
-              className="w-full py-3 font-medium"
-              style={{
-                background: primaryColor,
-                color: primaryTextColor,
-                borderRadius,
-              }}
-              type={isWalletConnected ? "submit" : "button"}
-              onPress={!isWalletConnected ? handleWalletConnect : undefined}
-            >
-              {isWalletConnected ? "Pay Now" : "Connect Wallet"}
-            </Button>
-            <ConnectButton />
+            {!isWalletConnected ? (
+              <Button
+                className="w-full py-3 font-medium"
+                style={{
+                  background: customization?.primaryColor || primaryColor,
+                  color: customization?.primaryTextColor || primaryTextColor,
+                  borderRadius: customization?.borderRadius || borderRadius,
+                }}
+                onPress={open}
+              >
+                Connect Wallet
+              </Button>
+            ) : (
+              <Button
+                className="w-full py-3 font-medium"
+                isDisabled={isPending}
+                isLoading={isPending}
+                style={{
+                  background: customization?.primaryColor || primaryColor,
+                  color: customization?.primaryTextColor || primaryTextColor,
+                  borderRadius: customization?.borderRadius || borderRadius,
+                }}
+                type="submit"
+              >
+                {isPending ? "Processing..." : "Pay Now"}
+              </Button>
+            )}
           </form>
         </Card>
       </motion.div>
